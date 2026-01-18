@@ -46,6 +46,18 @@ export class HttpBridgeWebSocketServer {
         connectedClients: this.clients.size,
       });
     });
+
+    // Test endpoint - send a test transcript
+    this.app.get('/test', (req, res) => {
+      const testMessage = req.query.message || 'Test transcript from server';
+      this.sendTranscriptDisplay(testMessage as string);
+      res.json({
+        success: true,
+        message: 'Test transcript sent',
+        clientCount: this.clients.size,
+        text: testMessage,
+      });
+    });
   }
 
   private setupWebSocket(): void {
