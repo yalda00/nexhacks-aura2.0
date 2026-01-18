@@ -79,7 +79,7 @@ export class VoicePipeline {
 
       this.room = new Room();
       this.room.on(RoomEvent.TrackSubscribed, (track) => {
-        if (track.kind !== TrackKind.Audio) return;
+        if (track.kind !== TrackKind.KIND_AUDIO) return;
         if (this.processingStream) return;
         this.processingStream = true;
         void this.processAudioTrack(track).finally(() => {
@@ -89,6 +89,7 @@ export class VoicePipeline {
 
       await this.room.connect(this.config.livekitUrl, token, {
         autoSubscribe: true,
+        dynacast: false,
       });
     } catch (error) {
       this.emitError(error);

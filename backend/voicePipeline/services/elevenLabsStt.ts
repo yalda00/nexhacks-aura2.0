@@ -41,10 +41,11 @@ export const transcribeAudio = async (
   const endpoint = 'https://api.elevenlabs.io/v1/speech-to-text';
   const wavBuffer = encodeWav(request.samples, request.sampleRate);
 
+  const wavBytes = new Uint8Array(wavBuffer);
   const form = new FormData();
   form.append(
     'audio',
-    new Blob([wavBuffer], { type: 'audio/wav' }),
+    new Blob([wavBytes], { type: 'audio/wav' }),
     'audio.wav'
   );
   form.append('model_id', request.modelId ?? 'scribe_v1');
