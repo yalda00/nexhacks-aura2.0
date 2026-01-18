@@ -1,0 +1,82 @@
+# --------------------
+# Dependencies
+# --------------------
+node_modules/
+**/node_modules/
+
+# --------------------
+# Build output
+# --------------------
+.next/
+dist/
+build/
+out/
+coverage/
+
+# --------------------
+# Environment variables
+# --------------------
+.env
+.env.*
+!.env.example
+
+# --------------------
+# Logs
+# --------------------
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# --------------------
+# OS / Editor junk
+# --------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --------------------
+# Cache / tooling
+# --------------------
+.cache/
+.turbo/
+.parcel-cache/
+.eslintcache
+
+# --------------------
+# TypeScript
+# --------------------
+*.tsbuildinfo
+
+# --------------------
+# Testing
+# --------------------
+playwright-report/
+test-results/
+
+# --------------------
+# Temporary files
+# --------------------
+tmp/
+temp/
+
+# --------------------
+# Docker
+# --------------------
+**/.docker/
+docker-data/
+
+# --------------------
+# ngrok / local tunnels
+# --------------------
+ngrok.yml
+
+# --------------------
+# Secrets / keys
+# --------------------
+*.pem
+*.key
+*.crt
