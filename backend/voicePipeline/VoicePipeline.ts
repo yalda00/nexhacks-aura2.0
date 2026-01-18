@@ -6,6 +6,7 @@ import {
   Room,
   RoomEvent,
   TrackKind,
+  TrackPublishOptions,
   TrackSource,
 } from '@livekit/rtc-node';
 import { transcribeAudio } from './services/elevenLabsStt';
@@ -396,9 +397,12 @@ export class VoicePipeline {
     const source = new AudioSource(sampleRate, channels);
     const trackName = this.config.ttsAudioTrackName ?? 'aura-tts';
     const track = LocalAudioTrack.createAudioTrack(trackName, source);
-    await this.room.localParticipant.publishTrack(track, {
-      source: TrackSource.SOURCE_MICROPHONE,
-    });
+    await this.room.localParticipant.publishTrack(
+      track,
+      new TrackPublishOptions({
+        source: TrackSource.SOURCE_MICROPHONE,
+      })
+    );
 
     this.ttsSource = source;
     this.ttsTrack = track;
