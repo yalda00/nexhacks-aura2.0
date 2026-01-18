@@ -18,27 +18,38 @@ const simpleKeywordDetection = (text: string): GeminiClassifierResult | null => 
   // Strip punctuation and normalize
   const normalized = text.toLowerCase().trim().replace(/[.,!?;:]/g, ' ');
 
-  // Wake word patterns (variations of "hey aura", "hi aura", etc.)
-  const wakePatterns = [
-    /\b(hey|hi|hello|yo|ok)\s+(aura|ora|or uh|aara)\b/i,
-    /\baura\b/i,  // Just "aura" alone
-    /\b(hey|hi)\s+or\b/i,  // Misheard as "hey or"
-  ];
-
-  // Stop word patterns
+  // Stop word patterns - CHECK FIRST (higher priority)
   const stopPatterns = [
-    /\b(bye|stop|cancel|shut up|nevermind|that's all)\s+(aura|ora)\b/i,
+    /\bbye\b/i,  // Just "bye" alone
+    /\bgoodbye\b/i,  // Just "goodbye" alone
+    /\b(bye|goodbye|stop|cancel|shut up|nevermind|that's all)\s+(aura|ora|oro|or\s*uh)\b/i,
     /\bbye\s+aura\b/i,
+    /\bgoodbye\s+aura\b/i,
+    /\bbye\s+oro\b/i,
+    /\bbye\s+or\s*uh\b/i,
+    /\b(bye|by)\s+or\b/i,  // "by or" misheard
+    /\bgoodbye\s+oro\b/i,
     /\bstop\s+aura\b/i,
     /\bcancel\b/i,
     /\bnevermind\b/i,
   ];
 
-  const hasWake = wakePatterns.some(pattern => pattern.test(normalized));
+  // Wake word patterns (variations of "hey aura", "hi aura", etc.)
+  const wakePatterns = [
+    /\b(hey|hi|hello|yo|ok)\s+(aura|ora|or uh|aara)\b/i,
+    /\b(hey|hi)\s+or\b/i,  // Misheard as "hey or"
+  ];
+
+  // Check stop FIRST - if it's a stop word, don't check wake
   const hasStop = stopPatterns.some(pattern => pattern.test(normalized));
+  if (hasStop) {
+    return { wake: false, stop: true };
+  }
+
+  const hasWake = wakePatterns.some(pattern => pattern.test(normalized));
 
   // Always return a result (never return null to avoid Gemini API calls)
-  return { wake: hasWake, stop: hasStop };
+  return { wake: hasWake, stop: false };
 };
 
 // Gemini API call with rate limiting

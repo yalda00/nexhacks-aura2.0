@@ -49,9 +49,22 @@ export class HttpBridgeWebSocketServer {
   }
 
   private setupWebSocket(): void {
-    this.wss.on('connection', (ws: WebSocket) => {
-      console.log('✓ New client connected to bridge server');
+    this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+      const clientIP = req.socket.remoteAddress;
+      console.log(`✓ New client connected to bridge server from ${clientIP}`);
+      console.log(`  Total clients connected: ${this.clients.size + 1}`);
       this.clients.add(ws);
+
+      // Keep connection alive with ping/pong
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 30000); // Ping every 30 seconds
+
+      ws.on('pong', () => {
+        // Connection is alive
+      });
 
       ws.on('message', (data: Buffer) => {
         try {
@@ -59,33 +72,35 @@ export class HttpBridgeWebSocketServer {
           this.handleMessage(message, ws);
         } catch (error) {
           console.error('Failed to parse message:', error);
-          this.config.onError?.(error as Error);
+          // Don't close connection on parse error, just log it
         }
       });
 
       ws.on('close', () => {
         console.log('Client disconnected from bridge server');
+        clearInterval(pingInterval);
         this.clients.delete(ws);
       });
 
       ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        this.config.onError?.(error);
+        console.error('WebSocket client error:', error);
+        // Don't immediately close - let the client reconnect
+        clearInterval(pingInterval);
         this.clients.delete(ws);
       });
     });
 
     this.wss.on('error', (error) => {
       console.error('WebSocket server error:', error);
-      this.config.onError?.(error);
+      // Server errors shouldn't kill the server
     });
   }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
-      this.server.listen(this.config.port, () => {
+      this.server.listen(this.config.port, '0.0.0.0', () => {
         console.log(`✓ HTTP Bridge WebSocket server listening on port ${this.config.port}`);
-        console.log(`✓ WebSocket endpoint: ws://localhost:${this.config.port}`);
+        console.log(`✓ WebSocket endpoint: ws://0.0.0.0:${this.config.port}`);
         console.log(`✓ Health check: http://localhost:${this.config.port}/`);
         resolve();
       });
@@ -141,17 +156,35 @@ export class HttpBridgeWebSocketServer {
     });
 
     this.broadcast(message);
+    console.log('[bridge] Sent transcript display to', this.clients.size, 'clients:', text.substring(0, 60));
   }
 
   /**
    * Send any message to all connected clients
    */
   broadcast(data: string): void {
+    let sentCount = 0;
     this.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
         client.send(data);
+        sentCount++;
       }
     });
+    console.log(`[bridge] Broadcasted to ${sentCount} clients`);
+  }
+
+  /**
+   * Send audio data to browser clients (sends MP3 audio as base64)
+   */
+  sendAudio(audioBuffer: ArrayBuffer): void {
+    const base64Audio = Buffer.from(audioBuffer).toString('base64');
+    const message = JSON.stringify({
+      type: 'audio',
+      content: base64Audio,
+    });
+
+    this.broadcast(message);
+    console.log('[bridge] Sent audio to browser clients');
   }
 
   /**

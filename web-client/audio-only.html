@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura Audio Output</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #fff;
+            text-align: center;
+        }
+        h1 {
+            color: #61dafb;
+        }
+        .status {
+            padding: 30px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #4caf50;
+            color: #fff;
+        }
+        .status.speaking {
+            background: #ff9800;
+            color: #000;
+        }
+        .status.disconnected {
+            background: #444;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔊 Aura Audio Output</h1>
+    <div class="status disconnected" id="status">
+        Connecting...
+    </div>
+
+    <script>
+        let audioContext = null;
+        let ws = null;
+
+        function getAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            return audioContext;
+        }
+
+        async function playAudio(base64Audio) {
+            console.log('🎵 Playing audio...');
+            document.getElementById('status').textContent = '🔊 Aura is speaking...';
+            document.getElementById('status').className = 'status speaking';
+
+            try {
+                const audioData = atob(base64Audio);
+                const arrayBuffer = new ArrayBuffer(audioData.length);
+                const view = new Uint8Array(arrayBuffer);
+                for (let i = 0; i < audioData.length; i++) {
+                    view[i] = audioData.charCodeAt(i);
+                }
+
+                const ctx = getAudioContext();
+
+                if (ctx.state === 'suspended') {
+                    await ctx.resume();
+                }
+
+                const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+                console.log('Audio duration:', audioBuffer.duration, 'seconds');
+
+                const source = ctx.createBufferSource();
+                source.buffer = audioBuffer;
+
+                const gainNode = ctx.createGain();
+                gainNode.gain.value = 2.0; // Volume boost
+
+                source.connect(gainNode);
+                gainNode.connect(ctx.destination);
+
+                source.start(0);
+                console.log('✅ Playing!');
+
+                source.onended = () => {
+                    console.log('Audio finished');
+                    document.getElementById('status').textContent = '✓ Connected - Listening for Aura...';
+                    document.getElementById('status').className = 'status connected';
+                };
+
+            } catch (error) {
+                console.error('❌ Audio failed:', error);
+                document.getElementById('status').textContent = '❌ Audio failed: ' + error.message;
+                document.getElementById('status').className = 'status disconnected';
+            }
+        }
+
+        function connect() {
+            ws = new WebSocket('ws://localhost:8765');
+
+            ws.onopen = () => {
+                console.log('✓ Connected to audio stream');
+                document.getElementById('status').textContent = '✓ Connected - Listening for Aura...';
+                document.getElementById('status').className = 'status connected';
+
+                // Initialize AudioContext on connection
+                getAudioContext();
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === 'audio' && data.content) {
+                        console.log('🔊 Received audio');
+                        playAudio(data.content);
+                    }
+                } catch (error) {
+                    console.error('Failed to parse message:', error);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                document.getElementById('status').textContent = '❌ Connection error';
+                document.getElementById('status').className = 'status disconnected';
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected, reconnecting...');
+                document.getElementById('status').textContent = 'Reconnecting...';
+                document.getElementById('status').className = 'status disconnected';
+                setTimeout(connect, 2000);
+            };
+        }
+
+        // Auto-connect on page load
+        connect();
+    </script>
+</body>
+</html>

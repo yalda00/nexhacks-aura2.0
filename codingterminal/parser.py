@@ -26,6 +26,19 @@ ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 # Noise prefixes to ignore (but NOT ❯ since that's used for options)
 ignore_prefixes = ("WRITE", "READ", "✽", "g)")
 
+# Lines to completely ignore (terminal UI noise)
+noise_patterns = [
+    "? for shortcuts",
+    "ctrl+c to interrupt",
+    "Esc to",
+    "thought for",
+    "Flibbertigibbeting",
+    "Prestidigitating",
+    "Cascading",
+    "\x07",  # Bell character
+    "0;",    # ANSI escape sequences
+]
+
 def is_separator(line):
     """Check if line is a separator (made of ─ or ╌ characters)"""
     return line and (line.replace('─', '') == '' or line.replace('╌', '') == '')
@@ -46,6 +59,10 @@ def process_line(line, current_capture, collecting_options, responses):
     """Process a single line and update state"""
     line = clean_line(line)
     if not line or line.startswith(ignore_prefixes):
+        return current_capture, collecting_options
+
+    # Skip lines containing terminal UI noise
+    if any(pattern in line for pattern in noise_patterns):
         return current_capture, collecting_options
 
     # New ⏺ line → save previous capture and start new
@@ -202,8 +219,10 @@ async def listen_for_queries(websocket, last_response_with_options):
     """Listen for incoming query messages from websocket"""
     try:
         async for message in websocket:
+            print(f"📨 Raw message received: {message[:100]}")
             try:
                 data = json.loads(message)
+                print(f"📋 Parsed message type: {data.get('type')}")
 
                 # Handle query injection
                 if data.get("type") == "query":
@@ -304,32 +323,32 @@ async def parse_log_file(websocket, last_response_with_options):
                     json.dump(full_list, jf, ensure_ascii=False, indent=2)
 
 async def main():
-    websocket = None
     # Shared dictionary to track the last response with options
     last_response_with_options = {}
 
-    # Try to connect to websocket server with keepalive
-    try:
-        websocket = await websockets.connect(
-            WS_URL,
-            ping_interval=20,  # Send ping every 20 seconds
-            ping_timeout=10    # Wait 10 seconds for pong response
-        )
-        print(f"✓ Connected to websocket server at {WS_URL}")
-        print(f"✓ Bidirectional mode: sending responses AND receiving queries")
-    except Exception as e:
-        print(f"⚠ Could not connect to websocket server: {e}")
-        print("  Parser will continue without websocket broadcasting")
+    while True:
+        websocket = None
+        try:
+            # Try to connect to websocket server with keepalive
+            websocket = await websockets.connect(
+                WS_URL,
+                ping_interval=20,  # Send ping every 20 seconds
+                ping_timeout=10    # Wait 10 seconds for pong response
+            )
+            print(f"✓ Connected to websocket server at {WS_URL}")
+            print(f"✓ Bidirectional mode: sending responses AND receiving queries")
 
-    # Run both tasks concurrently
-    if websocket:
-        await asyncio.gather(
-            parse_log_file(websocket, last_response_with_options),
-            listen_for_queries(websocket, last_response_with_options)
-        )
-    else:
-        # If no websocket, just parse logs
-        await parse_log_file(None, last_response_with_options)
+            # Run both tasks concurrently
+            await asyncio.gather(
+                parse_log_file(websocket, last_response_with_options),
+                listen_for_queries(websocket, last_response_with_options)
+            )
+        except websockets.exceptions.ConnectionClosed:
+            print("⚠ WebSocket connection closed. Reconnecting in 3 seconds...")
+            await asyncio.sleep(3)
+        except Exception as e:
+            print(f"⚠ WebSocket error: {e}. Reconnecting in 3 seconds...")
+            await asyncio.sleep(3)
 
 if __name__ == "__main__":
     try:

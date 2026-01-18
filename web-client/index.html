@@ -127,7 +127,7 @@
 
         <div class="input-group">
             <label for="tokenUrl">Token Server URL:</label>
-            <input type="text" id="tokenUrl" placeholder="http://localhost:3000/token" value="http://localhost:3000/token">
+            <input type="text" id="tokenUrl" placeholder="http://172.25.18.244:3000/token" value="http://172.25.18.244:3000/token">
         </div>
 
         <div class="input-group">
@@ -137,11 +137,12 @@
 
         <div class="input-group">
             <label for="identity">Your Identity:</label>
-            <input type="text" id="identity" placeholder="web-user" value="web-user">
+            <input type="text" id="identity" placeholder="phone-user" value="phone-user">
         </div>
 
         <button class="connect-btn" id="connectBtn" onclick="connect()">Connect & Start Voice</button>
         <button class="disconnect-btn" id="disconnectBtn" onclick="disconnect()">Disconnect</button>
+        <button class="connect-btn" onclick="testAudio()" style="background: #ff9800; margin-top: 10px;">Test Audio (Beep)</button>
 
         <div class="status disconnected" id="status">
             Disconnected
@@ -174,6 +175,20 @@
         let room = null;
         let transcriptWs = null;
 
+        // Create AudioContext once (iOS WebView compatible)
+        let audioContext = null;
+
+        function getAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            // Resume context if suspended (iOS requirement)
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            return audioContext;
+        }
+
         function updateStatus(message, className) {
             const statusEl = document.getElementById('status');
             statusEl.textContent = message;
@@ -193,32 +208,52 @@
             }
 
             // Highlight wake and stop words
+            console.log('🔍 Processing transcript for highlighting:', text);
             let highlightedText = text;
-            const wakeWords = ['hey aura', 'hi aura', 'hello aura', 'yo aura', 'ok aura', 'aura'];
-            const stopWords = ['bye aura', 'stop aura', 'cancel', 'nevermind'];
-
-            // Check for wake words
             let hasWake = false;
             let hasStop = false;
-            const lowerText = text.toLowerCase();
 
-            for (const word of wakeWords) {
-                if (lowerText.includes(word)) {
-                    const regex = new RegExp(`(${word})`, 'gi');
-                    highlightedText = highlightedText.replace(regex, '<span style="background: #4caf50; color: #000; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>');
+            // Check for wake words (case insensitive, flexible with punctuation)
+            const wakePatterns = [
+                { pattern: /(hey[,\s]*aura[?!,.]?)/gi, color: '#4caf50' },
+                { pattern: /(hi[,\s]*aura[?!,.]?)/gi, color: '#4caf50' },
+                { pattern: /(hello[,\s]*aura[?!,.]?)/gi, color: '#4caf50' },
+                { pattern: /(yo[,\s]*aura[?!,.]?)/gi, color: '#4caf50' },
+                { pattern: /(ok[,\s]*aura[?!,.]?)/gi, color: '#4caf50' }
+            ];
+
+            for (const {pattern, color} of wakePatterns) {
+                if (pattern.test(text)) {
+                    console.log('✅ Found wake word match:', pattern);
+                    highlightedText = text.replace(pattern, `<span style="background: ${color}; color: #000; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>`);
                     hasWake = true;
                     break;
                 }
             }
 
-            for (const word of stopWords) {
-                if (lowerText.includes(word)) {
-                    const regex = new RegExp(`(${word})`, 'gi');
-                    highlightedText = highlightedText.replace(regex, '<span style="background: #f44336; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>');
-                    hasStop = true;
-                    break;
+            // Check for stop words (case insensitive, flexible with punctuation)
+            const stopPatterns = [
+                { pattern: /(bye[,\s]*aura[?!,.]?)/gi, color: '#f44336' },
+                { pattern: /(bye[,\s]*oro[?!,.]?)/gi, color: '#f44336' },
+                { pattern: /(stop[,\s]*aura[?!,.]?)/gi, color: '#f44336' },
+                { pattern: /(bye[!,.]?)/gi, color: '#f44336' },
+                { pattern: /(goodbye[!,.]?)/gi, color: '#f44336' },
+                { pattern: /(cancel[!,.]?)/gi, color: '#f44336' },
+                { pattern: /(nevermind[!,.]?)/gi, color: '#f44336' }
+            ];
+
+            if (!hasWake) {
+                for (const {pattern, color} of stopPatterns) {
+                    if (pattern.test(text)) {
+                        console.log('✅ Found stop word match:', pattern);
+                        highlightedText = highlightedText.replace(pattern, `<span style="background: ${color}; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>`);
+                        hasStop = true;
+                        break;
+                    }
                 }
             }
+
+            console.log('🎨 Highlighting result - hasWake:', hasWake, 'hasStop:', hasStop);
 
             // Add new transcript line with timestamp
             const time = new Date().toLocaleTimeString();
@@ -236,39 +271,148 @@
             transcriptContent.scrollTop = transcriptContent.scrollHeight;
         }
 
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        let reconnectTimeout = null;
+
         function connectToTranscriptStream() {
-            // Connect to backend WebSocket to receive transcripts
-            const wsUrl = 'ws://localhost:8765';
-            transcriptWs = new WebSocket(wsUrl);
+            // Clear any existing reconnect timeout
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
 
-            transcriptWs.onopen = () => {
-                console.log('✓ Connected to transcript stream');
-            };
+            // Connect to backend WebSocket to receive transcripts and audio
+            const wsUrl = 'ws://172.25.18.244:8765';
 
-            transcriptWs.onmessage = (event) => {
-                console.log('📥 Received WebSocket message:', event.data);
-                try {
-                    const data = JSON.parse(event.data);
-                    console.log('📋 Parsed data:', data);
-                    // Accept both 'query' (for Claude Code) and 'transcript' (for display)
-                    if ((data.type === 'query' || data.type === 'transcript') && data.content) {
-                        console.log('✅ Adding transcript:', data.content);
-                        addTranscript(data.content);
-                    } else {
-                        console.log('⚠️ Unknown message type or no content:', data);
+            try {
+                transcriptWs = new WebSocket(wsUrl);
+
+                transcriptWs.onopen = () => {
+                    console.log('✓ Connected to transcript stream');
+                    reconnectAttempts = 0; // Reset counter on successful connection
+                };
+
+                transcriptWs.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log('📋 Message type:', data.type);
+
+                        // Handle transcript display
+                        if ((data.type === 'query' || data.type === 'transcript') && data.content) {
+                            console.log('✅ Adding transcript:', data.content);
+                            addTranscript(data.content);
+                        }
+                        // Handle audio playback
+                        else if (data.type === 'audio' && data.content) {
+                            console.log('🔊 Received audio data, size:', data.content.length);
+                            playAudio(data.content).catch(err => {
+                                console.error('Audio playback failed:', err);
+                            });
+                        }
+                    } catch (error) {
+                        console.error('Failed to parse message:', error);
                     }
-                } catch (error) {
-                    console.error('Failed to parse transcript message:', error);
+                };
+
+                transcriptWs.onerror = (error) => {
+                    console.error('Transcript WebSocket error:', error);
+                };
+
+                transcriptWs.onclose = () => {
+                    console.log('Transcript stream disconnected');
+
+                    // Attempt to reconnect
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        const delay = Math.min(1000 * reconnectAttempts, 5000);
+                        console.log(`🔄 Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+                        reconnectTimeout = setTimeout(connectToTranscriptStream, delay);
+                    } else {
+                        console.error('❌ Max reconnection attempts reached');
+                        updateStatus('Connection lost. Please refresh.', 'disconnected');
+                    }
+                };
+            } catch (error) {
+                console.error('Failed to create WebSocket:', error);
+            }
+        }
+
+        async function playAudio(base64Audio) {
+            console.log('🎵 Playing audio...');
+            updateStatus('🔊 Aura is speaking...', 'connected');
+            try {
+                // Convert base64 to ArrayBuffer
+                const audioData = atob(base64Audio);
+                const arrayBuffer = new ArrayBuffer(audioData.length);
+                const view = new Uint8Array(arrayBuffer);
+                for (let i = 0; i < audioData.length; i++) {
+                    view[i] = audioData.charCodeAt(i);
                 }
-            };
 
-            transcriptWs.onerror = (error) => {
-                console.error('Transcript WebSocket error:', error);
-            };
+                console.log('📊 Audio size:', arrayBuffer.byteLength, 'bytes');
 
-            transcriptWs.onclose = () => {
-                console.log('Transcript stream disconnected');
-            };
+                // Use Web Audio API (works better in iOS WebView)
+                const ctx = getAudioContext();
+                console.log('AudioContext state:', ctx.state);
+                console.log('AudioContext sample rate:', ctx.sampleRate);
+
+                // Decode WAV file
+                console.log('🔄 Attempting to decode audio...');
+                const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+                console.log('✅ Audio decoded successfully!');
+                console.log('📊 Audio duration:', audioBuffer.duration, 'seconds');
+                console.log('📊 Sample rate:', audioBuffer.sampleRate);
+                console.log('📊 Channels:', audioBuffer.numberOfChannels);
+
+                // Create source and connect to destination
+                const source = ctx.createBufferSource();
+                source.buffer = audioBuffer;
+
+                // Create gain node for volume control
+                const gainNode = ctx.createGain();
+                gainNode.gain.value = 1.0;
+
+                source.connect(gainNode);
+                gainNode.connect(ctx.destination);
+
+                // Play audio
+                source.start(0);
+                console.log('✅ Audio playing via Web Audio API!');
+
+                // Clean up when finished
+                source.onended = () => {
+                    console.log('🎵 Audio finished');
+                    updateStatus('✓ Connected! Say "Hey Aura" to start', 'connected');
+                };
+
+            } catch (error) {
+                console.error('❌ Failed to play audio:', error);
+                console.error('Error details:', error.name, error.message);
+                updateStatus('❌ Audio failed: ' + error.message, 'disconnected');
+
+                // Try playing a simple beep as fallback
+                console.log('🔔 Attempting fallback beep...');
+                try {
+                    const ctx = getAudioContext();
+                    const oscillator = ctx.createOscillator();
+                    const gainNode = ctx.createGain();
+
+                    oscillator.connect(gainNode);
+                    gainNode.connect(ctx.destination);
+
+                    oscillator.frequency.value = 440;
+                    oscillator.type = 'sine';
+                    gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+
+                    oscillator.start(ctx.currentTime);
+                    oscillator.stop(ctx.currentTime + 0.3);
+
+                    console.log('✅ Fallback beep attempted');
+                } catch (beepError) {
+                    console.error('❌ Even fallback beep failed:', beepError);
+                }
+            }
         }
 
         window.connect = async function() {
@@ -280,6 +424,14 @@
             const disconnectBtn = document.getElementById('disconnectBtn');
 
             try {
+                // CRITICAL: Initialize AudioContext on user gesture (iOS requirement)
+                const ctx = getAudioContext();
+                console.log('🔊 AudioContext initialized on user gesture. State:', ctx.state);
+                if (ctx.state === 'suspended') {
+                    await ctx.resume();
+                    console.log('🔊 AudioContext resumed. New state:', ctx.state);
+                }
+
                 updateStatus('Fetching token...', 'connecting');
                 connectBtn.disabled = true;
 
@@ -301,12 +453,95 @@
                 // Connect to LiveKit
                 room = new Room();
 
+                // Listen for remote audio tracks (TTS responses)
+                room.on('trackSubscribed', (track, publication, participant) => {
+                    console.log('📢 Track subscribed:', track.kind, 'from', participant.identity);
+                    console.log('📢 Track source:', publication.source);
+                    console.log('📢 Track name:', publication.trackName);
+
+                    if (track.kind === 'audio') {
+                        console.log('🔊 Attaching audio track to element');
+                        const audioElement = track.attach();
+                        audioElement.id = 'tts-audio-' + Date.now();
+                        audioElement.autoplay = true;
+                        audioElement.volume = 1.0;
+                        audioElement.muted = false;
+                        audioElement.setAttribute('playsinline', '');
+
+                        document.body.appendChild(audioElement);
+
+                        // Monitor audio data
+                        let audioStarted = false;
+                        const checkAudio = setInterval(() => {
+                            if (audioElement.currentTime > 0 && !audioElement.paused) {
+                                if (!audioStarted) {
+                                    console.log('🎵 AUDIO IS PLAYING! Time:', audioElement.currentTime);
+                                    audioStarted = true;
+                                }
+                            }
+                        }, 100);
+
+                        // Force play
+                        audioElement.play().then(() => {
+                            console.log('✅ Audio element playing successfully');
+                            console.log('   Volume:', audioElement.volume);
+                            console.log('   Muted:', audioElement.muted);
+                            console.log('   Paused:', audioElement.paused);
+                            console.log('   Duration:', audioElement.duration);
+                            console.log('   ReadyState:', audioElement.readyState);
+                        }).catch(err => {
+                            console.error('❌ Failed to play audio:', err);
+                            clearInterval(checkAudio);
+                        });
+
+                        // Clean up on track end
+                        track.on('ended', () => {
+                            console.log('🎵 Audio track ended');
+                            clearInterval(checkAudio);
+                        });
+
+                        // Monitor for errors
+                        audioElement.onerror = (e) => {
+                            console.error('❌ Audio element error:', e);
+                            clearInterval(checkAudio);
+                        };
+
+                        // Monitor when audio actually starts playing
+                        audioElement.onplaying = () => {
+                            console.log('🎵 Audio onplaying event fired');
+                        };
+
+                        audioElement.onended = () => {
+                            console.log('🎵 Audio ended');
+                            clearInterval(checkAudio);
+                        };
+                    }
+                });
+
+                room.on('trackUnsubscribed', (track) => {
+                    console.log('Track unsubscribed:', track.kind);
+                    track.detach().forEach(el => el.remove());
+                });
+
                 await room.connect(data.url, data.token);
 
-                updateStatus('Connected! Enabling microphone...', 'connecting');
+                updateStatus('Connected! Checking microphone...', 'connecting');
 
-                // Enable microphone
-                await room.localParticipant.setMicrophoneEnabled(true);
+                // Try to enable microphone (optional - not required for phone-based input)
+                try {
+                    await room.localParticipant.setMicrophoneEnabled(true);
+                    console.log('Microphone enabled');
+
+                    // Get the microphone track
+                    const tracks = Array.from(room.localParticipant.audioTrackPublications.values());
+                    console.log('Audio tracks published:', tracks.length);
+
+                    if (tracks.length === 0) {
+                        console.warn('No audio track published from computer (using phone mic instead)');
+                    }
+                } catch (micError) {
+                    console.warn('Computer microphone not available (using phone mic):', micError.message);
+                }
 
                 updateStatus('✓ Connected! Say "Hey Aura" to start', 'connected');
 
@@ -341,6 +576,37 @@
 
             updateStatus('Disconnected', 'disconnected');
             console.log('Disconnected from room');
+        }
+
+        window.testAudio = function() {
+            console.log('🔊 Testing audio with beep...');
+            try {
+                // Use same audio context
+                const ctx = getAudioContext();
+                console.log('AudioContext state:', ctx.state);
+
+                // Create a simple 440Hz beep for 0.5 seconds
+                const oscillator = ctx.createOscillator();
+                const gainNode = ctx.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(ctx.destination);
+
+                oscillator.frequency.value = 440; // A4 note
+                oscillator.type = 'sine';
+
+                gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+
+                oscillator.start(ctx.currentTime);
+                oscillator.stop(ctx.currentTime + 0.5);
+
+                console.log('✅ Beep played! If you heard it, audio is working.');
+                alert('Test beep played! Did you hear it?');
+            } catch (error) {
+                console.error('❌ Audio test failed:', error);
+                alert('Audio test failed: ' + error.message);
+            }
         }
     </script>
 </body>

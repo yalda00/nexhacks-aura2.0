@@ -10,6 +10,7 @@ import {
   TrackSource,
 } from '@livekit/rtc-node';
 import { transcribeAudio } from './services/elevenLabsStt';
+import { transcribeAudioDeepgram } from './services/deepgramStt';
 import { synthesizeSpeech, synthesizeSpeechPcm } from './services/elevenLabsTts';
 import { generateGeminiResponse } from './services/gemini';
 import { classifyWakeStop } from "./services/geminiClassifier";
@@ -30,6 +31,7 @@ export type VoicePipelineConfig = {
   elevenLabsVoiceId: string;
   elevenLabsSttModelId?: string;
   elevenLabsTtsModelId?: string;
+  deepgramApiKey?: string; // Optional backup STT provider
   sttLanguageCode?: string;
   sttSegmentSeconds?: number;
   wakePhrase?: string;
@@ -96,11 +98,28 @@ export class VoicePipeline {
           : await this.config.livekitToken();
 
       this.room = new Room();
-      this.room.on(RoomEvent.TrackSubscribed, (track) => {
+
+      this.room.on(RoomEvent.ParticipantConnected, (participant) => {
+        console.log('[room] Participant connected:', participant.identity);
+      });
+
+      this.room.on(RoomEvent.TrackPublished, (publication, participant) => {
+        console.log('[room] Track published by', participant.identity, '- kind:', publication.kind);
+      });
+
+      this.room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        console.log('[room] Track subscribed from', participant.identity, '- kind:', track.kind);
         if (track.kind !== TrackKind.KIND_AUDIO) return;
-        if (this.processingStream) return;
+
+        if (this.processingStream) {
+          console.warn('[room] ⚠️  Already processing a stream, ignoring track from', participant.identity);
+          return;
+        }
+
+        console.log('[room] ✓ Starting audio processing from', participant.identity);
         this.processingStream = true;
         void this.processAudioTrack(track).finally(() => {
+          console.log('[room] Audio processing ended for', participant.identity);
           this.processingStream = false;
         });
       });
@@ -108,6 +127,16 @@ export class VoicePipeline {
       await this.room.connect(this.config.livekitUrl, token, {
         autoSubscribe: true,
         dynacast: false,
+      });
+
+      console.log('[room] Connected! Remote participants:', this.room.remoteParticipants.size);
+
+      // List all participants and their audio tracks
+      this.room.remoteParticipants.forEach((participant) => {
+        console.log('[room]   Participant:', participant.identity);
+        participant.audioTrackPublications.forEach((pub) => {
+          console.log('[room]     - Audio track:', pub.trackSid, 'subscribed:', pub.isSubscribed);
+        });
       });
     } catch (error) {
       this.emitError(error);
@@ -242,44 +271,88 @@ export class VoicePipeline {
   private async handleAudioSegment(samples: Int16Array, sampleRate: number): Promise<void> {
     if (this.state === 'processing') return;
 
+    console.log('[STT] Processing audio segment:', samples.length, 'samples at', sampleRate, 'Hz');
+
+    let text = '';
+    let elevenLabsFailed = false;
+
+    // Try ElevenLabs first
     try {
-      const text = await transcribeAudio({
+      text = await transcribeAudio({
         apiKey: this.config.elevenLabsApiKey,
         samples,
         sampleRate,
         languageCode: this.config.sttLanguageCode,
         modelId: this.config.elevenLabsSttModelId,
       });
+      console.log('[STT] ElevenLabs succeeded');
+    } catch (error: any) {
+      elevenLabsFailed = true;
+      console.log('[STT] ElevenLabs failed, trying Deepgram backup...');
 
-      const trimmed = text.trim();
-      if (!trimmed) return;
-
-      this.handleTranscript({ text: trimmed, isFinal: true });
-    } catch (error) {
-      this.emitError(error);
+      // Try Deepgram as backup if available
+      if (this.config.deepgramApiKey) {
+        try {
+          text = await transcribeAudioDeepgram({
+            apiKey: this.config.deepgramApiKey,
+            samples,
+            sampleRate,
+            languageCode: this.config.sttLanguageCode,
+          });
+          console.log('[STT] Deepgram backup succeeded, text:', text);
+        } catch (deepgramError: any) {
+          console.error('[STT] Deepgram backup also failed:', deepgramError.message);
+          this.emitError(error); // Emit original ElevenLabs error
+          return;
+        }
+      } else {
+        console.log('[STT] No Deepgram API key configured');
+        this.emitError(error);
+        return;
+      }
     }
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      console.log('[STT] Empty transcript, skipping');
+      return;
+    }
+
+    this.handleTranscript({ text: trimmed, isFinal: true });
   }
 
   private handleTranscript(message: TranscriptMessage): void {
   const text = message.text.trim();
   if (!text) return;
 
+  console.log('[handleTranscript] Current state:', this.state, '| Text:', text);
+
   this.config.onTranscript?.(text, Boolean(message.isFinal));
+
+  // Check for stop words in ANY state (except processing)
+  if (this.state !== "processing") {
+    void this.checkStop(text);
+  }
 
   // While armed, we accumulate a little text and ask Gemini if it's a "wake"
   if (this.state === "armed") {
     this.gateBuffer.push(text);
+    console.log('[handleTranscript] Armed mode - buffer:', this.gateBuffer.join(" "));
 
     const now = Date.now();
     const tooSoon = now - this.lastClassifyAt < this.classifyCooldownMs;
 
     // only classify once we have some signal, and not too frequently
-    if (tooSoon || this.gateBuffer.join(" ").length < 8) return;
+    if (tooSoon || this.gateBuffer.join(" ").length < 8) {
+      console.log('[handleTranscript] Not checking wake yet (too soon or too short)');
+      return;
+    }
 
     this.lastClassifyAt = now;
     const candidate = this.gateBuffer.join(" ").slice(-200); // keep it short
     this.gateBuffer = []; // reset after sampling
 
+    console.log('[handleTranscript] Checking for wake word in:', candidate);
     void this.checkWake(candidate);
     return;
   }
@@ -287,13 +360,6 @@ export class VoicePipeline {
   // While listening, always append text
   if (this.state === "listening") {
     this.transcriptBuffer.push(text);
-
-    // occasionally check stop intent
-    const now = Date.now();
-    if (now - this.lastClassifyAt >= this.classifyCooldownMs) {
-      this.lastClassifyAt = now;
-      void this.checkStop(text);
-    }
     return;
   }
 
@@ -308,11 +374,16 @@ private async checkWake(text: string): Promise<void> {
       text,
     });
 
+    console.log('[checkWake] Result:', { text, wake: res.wake, stop: res.stop });
+
     if (!this.running) return;
 
     if (res.wake) {
+      console.log('[checkWake] ✓ WAKE WORD DETECTED! Transitioning to listening...');
       this.transcriptBuffer = [];
       this.setState("listening");
+    } else {
+      console.log('[checkWake] No wake word detected, staying armed');
     }
   } catch (e) {
     this.emitError(e);
@@ -327,12 +398,16 @@ private async checkStop(text: string): Promise<void> {
       text,
     });
 
+    console.log('[classifier] Stop detection result:', { text, stop: res.stop });
+
     if (!this.running) return;
 
     if (res.stop) {
+      console.log('[classifier] Stop word detected! Finishing listening...');
       void this.finishListening();
     }
   } catch (e) {
+    console.error('[classifier] Stop detection error:', e);
     this.emitError(e);
   }
 }

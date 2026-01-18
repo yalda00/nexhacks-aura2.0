@@ -1,0 +1,6 @@
+Live parser running. Starting fresh.
+WebSocket URL: ws://localhost:8765
+Watching for new responses only...
+
+✓ Connected to websocket server at ws://localhost:8765
+✓ Bidirectional mode: sending responses AND receiving queries
